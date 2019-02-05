@@ -1,7 +1,7 @@
 //-----------------------------------------------------------------------------
-// Project: Circus/broadcast
+// Project: psu
 // File: 	main.c
-// Brief:	Single main file containing all code
+// Brief:	Single main file containing all code, SI headers
 //-----------------------------------------------------------------------------
 
 //-----------------------------------------------------------------------------
@@ -19,7 +19,6 @@
 
 SBIT(LED0, SFR_P1, 0);  
 SBIT(LED1, SFR_P1, 1);  
-SBIT(PWM, SFR_P0, 2);  
 SBIT(BUT0, SFR_P1, 7);  
 SBIT(BUT1, SFR_P2, 1);  
 
@@ -44,9 +43,6 @@ volatile U8 	out_tail;
 volatile U8    button;
 volatile U8    psu_on;
 volatile U32   counter;
-
-volatile U16   pwm_counter;
-volatile U16   pwm_duty;
 
 //-----------------------------------------------------------------------------
 // Main Routine
@@ -82,16 +78,15 @@ void main (void){
               CLKSEL_CLKDIV__SYSCLK_DIV_1;	 
   
    // Setup XBAR   
-   P1MDIN   = P1MDIN_B2__ANALOG|
-              P1MDIN_B7__DIGITAL;
-   
-   P0MDOUT  = P0MDOUT_B4__PUSH_PULL;             
-   P1MDOUT  = P1MDOUT_B0__PUSH_PULL|
-              P1MDOUT_B1__PUSH_PULL|
-              P1MDOUT_B3__PUSH_PULL;             
-   P0SKIP   = 0xEF;                             // Skip all but UART pin
-   P1SKIP   = 0xFF;	                           // Skip all
-   XBR0     = XBR0_URT0E__ENABLED;              // Route out UART 
+   P1MDIN   = P1MDIN_B2__ANALOG|                // ADC
+              P1MDIN_B7__DIGITAL;               // Button P1.7
+                                                // Button P2.1
+   P0MDOUT  = P0MDOUT_B2__PUSH_PULL|             
+              P0MDOUT_B4__PUSH_PULL;             
+   P0SKIP   = 0xEB;                             // Do not skip P0.2 
+                                                // Do not skip P0.4
+   XBR1     = XBR1_PCA0ME__CEX0;                // Route out PCA0.CEX0 on P0.2
+   XBR0     = XBR0_URT0E__ENABLED;              // Route out UART P0.4 
    XBR2     = XBR2_WEAKPUD__PULL_UPS_ENABLED | 
               XBR2_XBARE__ENABLED;					 
       
@@ -102,6 +97,16 @@ void main (void){
    TH1      = 0xCB;                             // Magic values from datasheet
 	TL1      = 0xCB;
 
+   // Start 95.7KHz clock
+   PCA0CN   = PCA0CN_CR__STOP;
+   PCA0CPH0 = 0x00;
+   PCA0CPL0 = 0x00;
+   PCA0MD   = PCA0MD_CPS__SYSCLK;		 
+   PCA0CPM0 = PCA0CPM0_ECOM__ENABLED  |  
+              PCA0CPM0_MAT__ENABLED   | 
+              PCA0CPM0_PWM__ENABLED;
+   PCA0CN   = PCA0CN_CR__RUN;  
+    
    // Timer 2
 	TMR2CN   = TMR2CN_TR2__RUN;
   
@@ -113,9 +118,7 @@ void main (void){
 	IE       = IE_EA__ENABLED | 
 			     IE_ET2__ENABLED;
    
-   // !Setup 
-   pwm_duty       = 20;
-   pwm_counter    = 0;
+   // !Setup  
    counter  = 0;
    LED0     = 1;  
      
@@ -127,14 +130,16 @@ void main (void){
       
       // Sample ADC
       adc = readAdc();   
-      if(psu_on)
-         mV = adc;
-      else
-         mA = adc;
+      PCA0CPH0 = adc >> 2;
+      mV = adc;
+
+      //if(psu_on)
+      //   mV = adc;
+      //else
+      //   mA = adc;
      
 
-      // TODO: 
-      // - PWM
+      // TODO:  
       // - PID controller
 
       // Update display 
@@ -163,12 +168,7 @@ INTERRUPT (TIMER2_ISR, TIMER2_IRQn){
       counter--;
    }
    button = 0;
-   
-   // PWM
-   pwm_counter = (pwm_counter + 1) % 100;                            // Wraps 
-   if(pwm_counter == 0)          PWM = 1;
-   if(pwm_counter == pwm_duty)   PWM = 0;
-
+      
    // UART
    if(out_head != out_tail){
       SBUF0 = uart_out[out_tail];            // Timer tuned so no need to check
@@ -276,74 +276,74 @@ void character(U8 c, U8 l){
    m[3] = ' ';               
    m[4] = ' ';
    m[5] = ' ';                              
-   if(   ((c == '0') && ((l == 0) || (l == 4)))                || 
-         ((c == '2') && ((l == 0) || (l == 2) || (l == 4)))    ||
-         ((c == '3') && ((l == 0) || (l == 2) || (l == 4)))    ||
-         ((c == '4') && (l == 3))                              ||
-         ((c == '5') && ((l == 0) || (l == 2) || (l == 4)))    ||
-         ((c == '6') && ((l == 0) || (l == 2) || (l == 4)))    ||
-         ((c == '7') && ((l == 0)))                            ||
-         ((c == '8') && ((l == 0) || (l == 2) || (l == 4)))    ||
-         ((c == '9') && ((l == 0) || (l == 2) || (l == 4)))    ||
-         ((c == 'A') && ((l == 0) || (l == 2)))                ){
+   if(   ((c == '0') && ((l == 0) || (l == 4)))                      || 
+         ((c == '2') && ((l == 0) || (l == 2) || (l == 4)))          ||
+         ((c == '3') && ((l == 0) || (l == 2) || (l == 4)))          ||
+         ((c == '4') && (l == 3))                                    ||
+         ((c == '5') && ((l == 0) || (l == 2) || (l == 4)))          ||
+         ((c == '6') && ((l == 0) || (l == 2) || (l == 4)))          ||
+         ((c == '7') && ((l == 0)))                                  ||
+         ((c == '8') && ((l == 0) || (l == 2) || (l == 4)))          ||
+         ((c == '9') && ((l == 0) || (l == 2) || (l == 4)))          ||
+         ((c == 'A') && ((l == 0) || (l == 2)))                      ){
          m[1] = '-';               
          m[2] = '-';               
          m[3] = '-';               
          m[4] = '-';               
    }
-   else if(   ((c == '1') && ((l == 0)))                            ){
+   else if(   ((c == '1') && ((l == 0)))                             ){
          m[3] = '-';
    }
-   else if(   ((c == '1') && ((l == 1) || (l == 2) || (l == 3)))    ){
+   else if(   ((c == '1') && ((l == 1) || (l == 2) || (l == 3)))     ){
          m[4] = '|'; 
    }
-   else if(   ((c == '1') && ((l == 4)))                            ){
+   else if(   ((c == '1') && ((l == 4)))                             ){
          m[3] = '-';
          m[4] = '-';
          m[5] = '-'; 
    }
-   else if(   ((c == '2') && ((l == 3)))                            || 
-         ((c == '5') && ((l == 1)))                            || 
-         ((c == '6') && ((l == 1)))                            ){
+   else if(   ((c == '2') && ((l == 3)))                             || 
+         ((c == '5') && ((l == 1)))                                  || 
+         ((c == '6') && ((l == 1)))                                  ){
          m[0] = '|';                   
    } 
-   else if(   ((c == '2') && ((l == 1)))                            ||
-         ((c == '3') && ((l == 1) || (l == 3)))                ||
-         ((c == '4') && (l == 4))                              ||
-         ((c == '5') && (l == 3))                              ||
-         ((c == '9') && (l == 3))                              ){
+   else if(   ((c == '2') && ((l == 1)))                             ||
+         ((c == '3') && ((l == 1) || (l == 3)))                      ||
+         ((c == '4') && (l == 4))                                    ||
+         ((c == '5') && (l == 3))                                    ||
+         ((c == '9') && (l == 3))                                    ){
          m[5] = '|';                   
    } 
-   else if(   ((c == '0') && ((l == 1) || (l == 2) || (l == 3)))    ||
-         ((c == '4') && ((l == 1) || (l == 2)))                ||
-         ((c == '6') && ((l == 3)))                            ||
-         ((c == '8') && ((l == 1) || (l == 3)))                ||
-         ((c == '9') && ((l == 1)))                            ||
-         ((c == 'A') && ((l == 1) || (l == 3)))                ){
+   else if(   ((c == '0') && ((l == 1) || (l == 2) || (l == 3)))     ||
+         ((c == '4') && ((l == 1) || (l == 2)))                      ||
+         ((c == '6') && ((l == 3)))                                  ||
+         ((c == '8') && ((l == 1) || (l == 3)))                      ||
+         ((c == '9') && ((l == 1)))                                  ||
+         ((c == 'A') && ((l == 1) || (l == 3)))                      ){
          m[0] = '|';               
          m[5] = '|';                
    }
-   else if(   ((c == '7') && ((l == 1)))                            ){
+   else if(   ((c == '7') && ((l == 1)))                             ){
          m[4] = '|'; 
    }
-   else if(   ((c == '7') && ((l == 2)))                            ){
+   else if(   ((c == '7') && ((l == 2)))                             ){
          m[3] = '|'; 
    }
-   else if(   ((c == '7') && ((l == 3)))                            ){
+   else if(   ((c == '7') && ((l == 3)))                             ){
          m[2] = '|'; 
    }
-   else if(   ((c == '.') && ((l == 4)))                            ){
+   else if(   ((c == '.') && ((l == 4)))                             ){
          m[3] = 'O'; 
    }
-   else if(   ((c == 'V') && ((l == 1)))                            ){
+   else if(   ((c == 'V') && ((l == 1)))                             ){
          m[0] = '|';
          m[5] = '|'; 
    }
-   else if(   ((c == 'V') && ((l == 2)))                            ){
+   else if(   ((c == 'V') && ((l == 2)))                             ){
          m[1] = '|';
          m[4] = '|'; 
    }
-   else if(   ((c == 'V') && ((l == 3)))                            ){
+   else if(   ((c == 'V') && ((l == 3)))                             ){
          m[2] = '|';
          m[3] = '|'; 
    }
@@ -352,9 +352,6 @@ void character(U8 c, U8 l){
    ulo(' ');
    return;
 }
-
-
-
 
 //-----------------------------------------------------------------------------
 // END
