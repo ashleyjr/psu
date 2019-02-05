@@ -19,6 +19,7 @@
 
 SBIT(LED0, SFR_P1, 0);  
 SBIT(LED1, SFR_P1, 1);  
+SBIT(TIME, SFR_P0, 0);  
 SBIT(BUT0, SFR_P1, 7);  
 SBIT(BUT1, SFR_P2, 1);  
 
@@ -44,6 +45,8 @@ volatile U8    button;
 volatile U8    psu_on;
 volatile U32   counter;
 
+volatile U16   adc_user;
+
 //-----------------------------------------------------------------------------
 // Main Routine
 //-----------------------------------------------------------------------------
@@ -52,6 +55,7 @@ void main (void){
    // Init 
    U16 mA;
    U16 mV;
+   U16 mV_last;
    U16 adc;
    U16 last_adc;
    U8  last_psu_on;
@@ -81,19 +85,29 @@ void main (void){
    P1MDIN   = P1MDIN_B2__ANALOG|                // ADC
               P1MDIN_B7__DIGITAL;               // Button P1.7
                                                 // Button P2.1
-   P0MDOUT  = P0MDOUT_B2__PUSH_PULL|             
-              P0MDOUT_B4__PUSH_PULL;             
+   P0MDOUT  = P0MDOUT_B0__PUSH_PULL|            // Timing debug            
+              P0MDOUT_B2__PUSH_PULL|            // UART
+              P0MDOUT_B4__PUSH_PULL;            // PWM
    P0SKIP   = 0xEB;                             // Do not skip P0.2 
                                                 // Do not skip P0.4
    XBR1     = XBR1_PCA0ME__CEX0;                // Route out PCA0.CEX0 on P0.2
    XBR0     = XBR0_URT0E__ENABLED;              // Route out UART P0.4 
    XBR2     = XBR2_WEAKPUD__PULL_UPS_ENABLED | 
               XBR2_XBARE__ENABLED;					 
-      
+  
+   // Timer 0
+	CKCON    = CKCON_T0M__PRESCALE|
+              CKCON_SCA__SYSCLK_DIV_48;
+	TMOD     = TMOD_T0M__MODE2;
+	TCON     = TCON_TR0__RUN; 
+   TH0      = 0x80;                             // Magic values from datasheet
+	TL0      = 0x80;
+
+
    // Setup 230400 Baud UART and BAUD gen on timer 1
-	CKCON    = CKCON_T1M__SYSCLK;
-	TMOD     = TMOD_T1M__MODE2;
-	TCON     = TCON_TR1__RUN; 
+	CKCON    |= CKCON_T1M__SYSCLK;
+	TMOD     |= TMOD_T1M__MODE2;
+	TCON     |= TCON_TR1__RUN; 
    TH1      = 0xCB;                             // Magic values from datasheet
 	TL1      = 0xCB;
 
@@ -116,37 +130,35 @@ void main (void){
    
    // Interrupt
 	IE       = IE_EA__ENABLED | 
-			     IE_ET2__ENABLED;
+		        IE_ET0__ENABLED|
+              IE_ET2__ENABLED;
    
    // !Setup  
    counter  = 0;
    LED0     = 1;  
      
    while(1){   
-     
+    
       // Sample button
       if((0 == BUT0) || (0 == BUT1))
          button = 1;  
       
       // Sample ADC
-      adc = readAdc();   
-      PCA0CPH0 = adc >> 2;
-      mV = adc;
+      //adc = readAdc();   
+      PCA0CPH0 = adc_user >> 4; 
 
-      //if(psu_on)
-      //   mV = adc;
-      //else
-      //   mA = adc;
+      if(psu_on)
+         mV = adc_user;;
      
 
-      // TODO:  
+      // TODO: 
       // - PID controller
 
       // Update display 
-      if((last_psu_on != psu_on) || ((last_adc >> 4) != (adc >> 4))){ 
-         display(psu_on, mA, mV);
+      if((last_psu_on != psu_on) || ((mV >> 4) != (mV_last >> 4))){  
+         display(psu_on, mA, mV); 
          last_psu_on = psu_on;
-         last_adc    = adc;
+         mV_last     = mV;
       }
 
 
@@ -156,8 +168,26 @@ void main (void){
 //-----------------------------------------------------------------------------
 // Interrupt Routines
 //-----------------------------------------------------------------------------
+INTERRUPT (TIMER0_ISR, TIMER0_IRQn){      
+   U16 adc_volts;
 
-INTERRUPT (TIMER2_ISR, TIMER2_IRQn){      
+   TIME=1;
+   
+   ADC0MX   = ADC0MX_ADC0MX__ADC0P10;     // User ADC on P1.2
+   ADC0CN0 |= ADC0CN0_ADBUSY__SET;
+   while(ADC0CN0 & ADC0CN0_ADBUSY__SET);
+   adc_user = (ADC0H << 8)|ADC0L;
+   
+   ADC0MX   = ADC0MX_ADC0MX__ADC0P5;      // PID ADC on P0.5
+   ADC0CN0 |= ADC0CN0_ADBUSY__SET;
+   while(ADC0CN0 & ADC0CN0_ADBUSY__SET);
+   adc_volts = (ADC0H << 8)|ADC0L;
+
+
+   TIME=0;
+}
+
+INTERRUPT (TIMER2_ISR, TIMER2_IRQn){       
    // Button timer
    if(counter == 0){
       if(button == 1){ 
@@ -179,7 +209,7 @@ INTERRUPT (TIMER2_ISR, TIMER2_IRQn){
    // Timer
    TMR2H = 253;                              // Reset timer
    TMR2L = 240;                              // Tuned for baud rate
-   TMR2CN_TF2H = 0; 
+   TMR2CN_TF2H = 0;  
 }
 
 //-----------------------------------------------------------------------------
