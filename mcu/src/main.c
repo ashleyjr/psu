@@ -15,7 +15,10 @@
 // Defines
 //-----------------------------------------------------------------------------
 
-#define UART_SIZE_OUT   30
+#define SM_INIT         0
+#define SM_USER         1
+#define SM_PID          2
+#define UART_SIZE_OUT   10
 
 SBIT(LED0, SFR_P1, 0);  
 SBIT(LED1, SFR_P1, 1);  
@@ -41,11 +44,20 @@ volatile U8 	uart_out[UART_SIZE_OUT];
 volatile U8 	out_head;
 volatile U8 	out_tail;
 
+volatile U8    state;
 volatile U8    button;
 volatile U8    psu_on;
 volatile U32   counter;
 
-volatile U16   adc_user;
+volatile U16   adc_u;
+volatile U16   adc_v;
+
+volatile U16   target_v;
+volatile S32   pid_out;
+volatile S32   pid_p;
+volatile S32   pid_i;
+volatile S32   pid_err_int;
+volatile S32   pid_err_last;
 
 //-----------------------------------------------------------------------------
 // Main Routine
@@ -56,13 +68,18 @@ void main (void){
    U16 mA;
    U16 mV;
    U16 mV_last;
+   U16 mV_change;
    U16 adc;
    U16 last_adc;
    U8  last_psu_on;
-  
+ 
+   state       = SM_INIT;
    counter     = 0;
    psu_on      = 0;
    last_psu_on = 0;
+
+   pid_err_last   = 0;
+   pid_err_int    = 0;
 
    out_head = 0;
    out_tail = 0;
@@ -86,8 +103,8 @@ void main (void){
               P1MDIN_B7__DIGITAL;               // Button P1.7
                                                 // Button P2.1
    P0MDOUT  = P0MDOUT_B0__PUSH_PULL|            // Timing debug            
-              P0MDOUT_B2__PUSH_PULL|            // UART
-              P0MDOUT_B4__PUSH_PULL;            // PWM
+              P0MDOUT_B2__PUSH_PULL|            // PWM
+              P0MDOUT_B4__PUSH_PULL;            // UART
    P0SKIP   = 0xEB;                             // Do not skip P0.2 
                                                 // Do not skip P0.4
    XBR1     = XBR1_PCA0ME__CEX0;                // Route out PCA0.CEX0 on P0.2
@@ -100,7 +117,7 @@ void main (void){
               CKCON_SCA__SYSCLK_DIV_48;
 	TMOD     = TMOD_T0M__MODE2;
 	TCON     = TCON_TR0__RUN; 
-   TH0      = 0x80;                             // Magic values from datasheet
+   TH0      = 0x80;
 	TL0      = 0x80;
 
 
@@ -113,8 +130,8 @@ void main (void){
 
    // Start 95.7KHz clock
    PCA0CN   = PCA0CN_CR__STOP;
-   PCA0CPH0 = 0x00;
-   PCA0CPL0 = 0x00;
+   PCA0CPH0 = 0xFF;
+   PCA0CPL0 = 0xFF;
    PCA0MD   = PCA0MD_CPS__SYSCLK;		 
    PCA0CPM0 = PCA0CPM0_ECOM__ENABLED  |  
               PCA0CPM0_MAT__ENABLED   | 
@@ -143,20 +160,15 @@ void main (void){
       if((0 == BUT0) || (0 == BUT1))
          button = 1;  
       
-      // Sample ADC
-      //adc = readAdc();   
-      PCA0CPH0 = adc_user >> 4; 
-
-      if(psu_on)
-         mV = adc_user;;
      
-
-      // TODO: 
-      // - PID controller
+      if(psu_on == 0){
+         mV = (U16)((float)adc_u*(float)9.78);
+         mV = (mV / 250) * 250; 
+      }
 
       // Update display 
-      if((last_psu_on != psu_on) || ((mV >> 4) != (mV_last >> 4))){  
-         display(psu_on, mA, mV); 
+      if((last_psu_on != psu_on) || (mV != mV_last)){  
+         display(psu_on, mV, 0); 
          last_psu_on = psu_on;
          mV_last     = mV;
       }
@@ -169,20 +181,49 @@ void main (void){
 // Interrupt Routines
 //-----------------------------------------------------------------------------
 INTERRUPT (TIMER0_ISR, TIMER0_IRQn){      
-   U16 adc_volts;
+   S32   pid_err; 
 
    TIME=1;
+   switch(state){   
+      case SM_INIT:  // Start user sample
+                     // User ADC on P1.2
+                     ADC0MX   = ADC0MX_ADC0MX__ADC0P10;
+                     ADC0CN0 |= ADC0CN0_ADBUSY__SET;
+                     // Next state
+                     state = SM_USER;
+                     break;
+      case SM_USER:  // Get user sample, start PID sample 
+                     while(ADC0CN0 & ADC0CN0_ADBUSY__SET);
+                     adc_u = (ADC0H << 8)|ADC0L; 
+                     // PID ADC on P0.5
+                     ADC0MX   = ADC0MX_ADC0MX__ADC0P5;
+                     ADC0CN0 |= ADC0CN0_ADBUSY__SET;                    
+                     // Next state
+                     state = SM_PID;
+                     break;
+      case SM_PID:   // Get PI sample
+                     while(ADC0CN0 & ADC0CN0_ADBUSY__SET);
+                     adc_v = (ADC0H << 8)| ADC0L; 
+                     // User ADC on P1.2
+                     ADC0MX   = ADC0MX_ADC0MX__ADC0P10;   
+                     ADC0CN0 |= ADC0CN0_ADBUSY__SET;
+                     // PI
+                     if(psu_on){
+                        pid_err        = (S32)(target_v - adc_v); 
+                        pid_err_int    += ((pid_err + pid_err_last) >> 1);
+                        pid_out        = (pid_err * pid_p) + (pid_err_int * pid_i);
+                        PCA0CPH0       = 0xFF - (pid_out >> 24); 
+                        pid_err_last   = pid_err;  
+                     }else{
+                        pid_err_int    = 0;
+                        pid_err_last   = 0;
+                        PCA0CPH0       = 0xFF; 
+                     }
+                     // Next state 
+                     state = SM_USER;
+                     break;
    
-   ADC0MX   = ADC0MX_ADC0MX__ADC0P10;     // User ADC on P1.2
-   ADC0CN0 |= ADC0CN0_ADBUSY__SET;
-   while(ADC0CN0 & ADC0CN0_ADBUSY__SET);
-   adc_user = (ADC0H << 8)|ADC0L;
-   
-   ADC0MX   = ADC0MX_ADC0MX__ADC0P5;      // PID ADC on P0.5
-   ADC0CN0 |= ADC0CN0_ADBUSY__SET;
-   while(ADC0CN0 & ADC0CN0_ADBUSY__SET);
-   adc_volts = (ADC0H << 8)|ADC0L;
-
+   }
 
    TIME=0;
 }
